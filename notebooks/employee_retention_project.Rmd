@@ -1,0 +1,922 @@
+---
+title: "Analysis of Factors Affecting Employee Retention"
+author: "Pauline Korukundo and Martin Vivas"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+The dplyr and ggplot2 packages were used for the tidying, data wrangling and visualization during the Exploratory Data Analysis.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("ROSE")
+#install.packages("tidypredict")
+#install.packages("pROC")
+
+#load the libraries to use
+set.seed(1)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(tidyr)
+library(forcats)
+library(class) #for KNN Classification
+library(randomForest)
+library(AICcmodavg) 
+library(e1071)
+library(glmnet)  
+library(ROSE)
+library(caTools)
+library(tidypredict)
+library(pROC)
+library(tidymodels)
+library(shiny)
+library(forecast)
+```
+
+# 1. Introduction
+
+```{r load_data, echo=FALSE}
+employee_data <- read.csv("../data/raw/MFG10YearTerminationData.csv") 
+```
+
+The MFG10 Year Termination dataset contains 18 variables and 49,653 observations on employee data including their demographics, how long they have worked, those that are still employed and for terminated employees, the reason for termination is indicated.
+
+```{r summary, echo=FALSE, size = 'tiny'}
+#summary(employee_data)
+#glimpse(employee_data)
+
+```
+
+# 2. Tidying and Data Transformations
+
+```{r tidying, echo=FALSE}
+employee_data <- subset(employee_data, select= -c(gender_full, birthdate_key, terminationdate_key, recorddate_key)) 
+#sum(is.na(employee_data))
+```
+
+The data set does not contain any missing values. Unnecessary values such as gender_full, birthdate_key, terminationdate_key, and recorddate_key were removed. Other variables will be introduced to derive better insights on the data.
+
+Summary statistics for age, length of service, departments, and job titles show the youngest employees are 19, the oldest are 65, and the median age is 42. The minimum length of service is 0 years, and the maximum is 26 years.
+
+```{r summary_stats, echo=FALSE}
+summary_stats <- summary(employee_data[, c("age","length_of_service","department_name","job_title")])
+#summary_stats
+```
+
+```{r regions, echo=FALSE}
+
+# Generate region based on cities
+city_to_region <- data.frame(
+  city_name = c('Vancouver', 'Terrace', 'Nanaimo', 'Nelson', 'Kelowna', 'Victoria', 
+           'Kamloops', 'Fort St John', 'Surrey', 'Vernon', 'Quesnel', 'Chilliwack', 
+           'Dawson Creek', 'Squamish', 'New Westminster', 'Port Coquitlam', 'Cortes Island', 'Burnaby', 
+           'Bella Bella', 'Cranbrook', 'Williams Lake', 'Trail', 'Prince George', 'Richmond', 
+           'Grand Forks', 'West Vancouver', 'Abbotsford', 'Aldergrove', 'Langley', 'North Vancouver', 
+           'White Rock', 'New Westminister', 'Fort Nelson', 'Haney', 'Valemount', 'Ocean Falls', 
+           'Princeton', 'Dease Lake', 'Pitt Meadows', 'Blue River'),
+  region = c('Southwest', 'Southwest', 'Island/Coast', 'Kootenay Region', 'Thompson-Okanagan', 'Island/Coast', 
+             'Thompson-Okanagan', 'North Coast and Nechako', 'Southwest', 'Thompson-Okanagan', 'Cariboo Region', 'Southwest',
+             'North Coast and Nechako', 'Southwest', 'Southwest', 'Southwest', 'Island/Coast', 'Southwest', 
+             'Island/Coast', 'Kootenay Region', 'Cariboo Region', 'Kootenay Region', 'North Coast and Nechako', 'Southwest',
+             'Kootenay Region', 'Southwest', 'Southwest', 'Southwest', 'Southwest', 'Southwest', 
+             'Southwest', 'Southwest', 'North Coast and Nechako', 'Southwest', 'Southwest', 'Island/Coast', 
+             'Southwest', 'North Coast and Nechako', 'Southwest', 'Southwest')
+)
+
+# Merge the data frame with the mapping table
+employee_data <- left_join(employee_data, city_to_region, by = "city_name")
+
+```
+
+
+
+# 3. Descriptive Analytics
+
+This section explores the employee data to get insights on the distribution and relationships between different variables.
+
+```{r histogram, echo=FALSE}
+ggplot(employee_data, aes(x = age)) +
+    geom_histogram(binwidth = 5) +
+    ggtitle("Employee's Age Distribution") +
+    expand_limits(x=0)
+
+```
+
+The employees are generally between the ages of 17 and 68 with most employees in their mid twenties and late fifties.
+
+```{r boxplot, echo=FALSE}
+
+ggplot(data=employee_data, aes(x = BUSINESS_UNIT, y = length_of_service, fill=BUSINESS_UNIT)) +
+  geom_boxplot() +
+  ggtitle("Length of Service by Business Unit") +
+  labs(x="Business Unit",
+       y="Length of Service",
+       fill="Business Unit")+
+  theme_classic()
+```
+
+Employees working at the Head Office business unit have a longer term of service with the company, averaging 19 years, while those at the Stores business unit work for an average of 10 years and at most 15 years.
+
+```{r barplot, echo=FALSE}
+ggplot(data=employee_data, aes(x=gender_short))+
+  geom_bar()+
+  ggtitle("Gender Distribution") +
+  theme_classic()+
+  labs(x="Gender",
+       y="Count")
+```
+
+The company has slightly more females than males.
+
+```{r age_length, echo=FALSE}
+ggplot(data=employee_data, aes(x=age, y=length_of_service, color=age))+
+  geom_point()+
+  ggtitle("Scatterplot of Age vs. Length of Service") +
+  theme_classic()+
+  labs(x="Age",
+       y="Length of Service")
+```
+
+Employees in their early fifties and sixties are generally employed for a longer time than those in their early twenties and forties.
+
+## Active vs Terminated Employee Categories
+
+```{r active_employees, echo=FALSE}
+# Set Data on Active and Terminated Employees
+active_employees <- employee_data %>%
+  filter(STATUS=="ACTIVE") %>%
+  group_by(EmployeeID, job_title, gender_short, department_name, city_name) %>%
+  summarize(meanAge=mean(age), maxServiceLength = max(length_of_service), .groups = "drop")
+
+
+terminated_employees <- employee_data %>%
+  filter(STATUS=="TERMINATED") %>%
+  group_by(EmployeeID, job_title, gender_short, termreason_desc, department_name) %>%
+  summarize(meanAge=mean(age), maxServiceLength = max(length_of_service), .groups = "drop")
+
+```
+
+### Active Employees
+
+```{r visualize_active_employees, echo=FALSE}
+ggplot(active_employees, aes(x=meanAge, y=maxServiceLength, size=meanAge))+
+  geom_point()+
+  ggtitle("Active Employee Age Range")+
+  labs(x="Mean Age",
+       y="Maximum Length of Service")+
+  theme_classic()
+```
+
+The active employee age range has a bimodal distribution. Most active employees in their twenties have been working for less than 10 years, while those above 40 have been working for 15 to 26 years.
+
+```{r box_active_employees, echo=FALSE}
+
+ggplot(active_employees, aes(x=meanAge,fill=after_stat(density)))+
+  geom_histogram(binwidth = 2)+
+  ggtitle("Active Employees")+
+  labs(x="Active Employee Mean Age", y="Density") +
+  theme_classic()+ 
+  scale_fill_gradient(low="lightblue", high="darkblue")
+
+active_departments <- active_employees %>%
+  count(department_name) %>%
+  filter(n>40) #looking at all departments with more than 20 employees
+
+kable(active_departments[1:6,1:2], caption = "A table of Active Employees by Department")
+
+```
+
+#### Active Employees above 40
+
+```{r active_above_forty, echo=FALSE}
+#Analysis employees above 40 years
+active_above_forty <- active_employees %>%
+  filter(meanAge > 40) %>%
+  arrange(desc(meanAge)) 
+
+active_above_forty
+                   
+active_department_above_forty <- active_above_forty %>%
+  count(department_name) %>%
+  filter(n>20) #looking at departments with more than 20 employees
+
+#kable(active_department_above_forty[1:7,1:2], caption = "Active Employee above 40 by Departments")
+
+ggplot(active_department_above_forty, 
+       aes(x=department_name, y = n, fill=department_name))+
+  geom_col()+
+  ggtitle("Departments of Active Employees Above 40")+
+  labs(x="Number of Employees", y="Department Name") +
+  theme_classic()
+
+```
+
+The oldest employees are female and working in the Dairy and Meats departments. They have worked for 13 years. Generally, this group of employees works in Produce, Meats, and Bakery, with very few in store Management.
+
+#### Active Employees Below 40
+
+```{r active_below_forty, echo=FALSE}
+active_below_forty <- active_employees %>%
+  filter(meanAge < 40) %>%
+  arrange((meanAge)) 
+
+kable(active_below_forty[1:8,1:7], caption = "Active Employee below 40 by meanAge")
+
+active_department_below_forty <- active_below_forty %>%
+  count(department_name)
+
+#kable(active_department_below_forty[1:6,1:2], caption = "Active Employee below 40 by Department")
+
+ggplot(active_department_below_forty, 
+       aes(x=department_name, y = n, fill = department_name))+
+  geom_col()+
+  ggtitle("Departments of Active Employees Below 40")+
+  labs(x="Number of Employees", y="Department Name") +
+  theme_classic()
+  
+```
+
+The youngest workforce has a mixture of males and females in the customer service and produce departments. The customer service department has the highest number of employees below 40 years.
+
+### Terminated Employees
+
+```{r terminated_age_employees, echo=FALSE}
+ggplot(terminated_employees, aes(x=meanAge, y=maxServiceLength, color=meanAge))+
+  geom_point()+
+  ggtitle("Terminated Employee Age Range")+
+  labs(x="Maximum Length of Service",
+       y="Mean Age") +
+  theme_classic()
+```
+
+The terminated employees with a mean age of 50-60 have worked for more than 20 years. On the other hand, employees in their 20s and 30s that were terminated worked for less than 10 years.
+
+#### Reasons for Termination
+
+```{r box_terminated_employees, echo=FALSE}
+ggplot(terminated_employees, aes(x=termreason_desc, y=meanAge, fill=termreason_desc))+
+  geom_boxplot()+
+  ggtitle("Terminated Employee Reasons") +
+  labs(x="Termination Reason", y= "Mean Age of Employees", fill = "Termination Reason")+
+  theme_classic()
+  
+```
+
+Terminated employees in their 40s were laid off, while those that resigned were mostly in their 30s with some outliers in their 60s. Others went into retirement at a mean age of 65.
+
+```{r unique_employees, echo=FALSE}
+#Calculating the total number of employees
+unique_employees <- employee_data %>% 
+  select(EmployeeID) %>%
+  distinct()
+
+total_employees <- nrow(unique_employees)
+cat("Number of Unique Employees:", total_employees, "\n")
+```
+
+Over the 10 years, the company has had a total of 6,284 different employees. To further understand these employees, we perform analytics in the next sections that will help HR professionals to know the employees at risk and those likely to stay with the company.
+
+### Retention and Termination Trends by Functional Units
+
+```{r op_unit, echo=FALSE}
+# Data Preparation
+
+# Create a mapping table for department to functional units
+department_mapping <- data.frame(
+  functional_unit = c("Finance", "Finance", "Finance", "Finance", 
+                      "HR", "HR", "HR", "HR", "HR", "IT", "IT",
+                      "Management", "Management", "Management", "Operations", "Operations",
+                      "Operations", "Operations", "Operations", "Operations", "Operations", 
+                      "Legal", "Legal", "Legal"),
+  department_name = c('Accounts Payable', 'Accounting', 'Compensation', 'Accounts Receiveable', 
+                "Recruiter", "Recruitment", "Training", 'Employee Records', "Labor Relations",
+                'Information Technology', 'HR Technology',
+                'Store Manager', 'Store Management',  'Executive', 'Meats', 'Dairy', 'Produce', 
+                'Bakery', 'Processed Foods', 'Customer Service Manager', 'Customer Service',
+                'Investment', 'Audit', 'Legal')
+)
+
+# Merge the data frame with the mapping table
+employee_data <- left_join(employee_data, department_mapping, by = "department_name")
+
+#Adding the functional unit to the employee_data dataframe
+employee_data$functional_unit = factor(employee_data$functional_unit)
+
+
+# Add mean age and length of service, by functional unit
+employee_data <- employee_data %>%
+ group_by(functional_unit) %>%
+ mutate(mean_age = mean(age),
+        mean_length_of_service = mean(length_of_service))
+
+summary_data <- employee_data %>%
+  group_by(STATUS_YEAR, STATUS, functional_unit) %>%
+  summarize(TotalEmployees = n(), .groups = "drop") %>%
+  spread(STATUS, TotalEmployees, fill = 0) %>%
+  group_by(functional_unit) %>%
+  mutate(previous_active = lag(ACTIVE, 1L, default = 0), # shift down 1 row for each functional_unit
+       termination_rate = 100 * TERMINATED / previous_active,
+       retention_rate = 100 * ACTIVE / previous_active)
+
+#Create new dataframe for functional units to see the retention and termination rates
+new_data <- employee_data %>%
+  group_by(STATUS_YEAR, STATUS, functional_unit, mean_age, mean_length_of_service) %>%
+  summarize(TotalEmployees = n(), .groups = "drop") %>%
+  spread(STATUS, TotalEmployees, fill = 0) %>%
+  group_by(functional_unit) %>%
+  mutate(previous_active = lag(ACTIVE, 1L, default = 0), 
+       termination_rate = 100 * TERMINATED / previous_active,
+       retention_rate = 100 * ACTIVE / previous_active)
+
+# Remove Inf and NaN values caused by the lag() function and display table
+summary_data <- summary_data[complete.cases(new_data), ]
+#summary_data
+
+# Remove Inf and NaN values caused by the lag() function
+new_data_clean <- new_data[complete.cases(new_data), ]
+#new_data_clean
+
+#Remove 2006 since it has Inf retention and termination rate
+new_data_clean <- new_data_clean %>%
+  filter(STATUS_YEAR != 2006)
+
+```
+
+#### Visualizing Trends by Functional Unit
+
+```{r group_functional_unit, echo=FALSE}
+
+ggplot(new_data_clean, aes(x=STATUS_YEAR, y=termination_rate, color=functional_unit)) +
+  geom_jitter(alpha=0.6) +
+  geom_smooth(method="lm", se=FALSE)+
+  ggtitle("Termination Rate by Functional Unit") +
+  labs(x="Year",
+       y="Termination Rate") +
+  xlim(2006, 2016)
+
+ggplot(new_data_clean, aes(x=STATUS_YEAR, y=retention_rate, color=functional_unit)) +
+  geom_jitter(alpha=0.4) +
+  geom_smooth(method="lm", se=FALSE)+
+  theme_classic() +
+  ggtitle("Retention Rate by Functional Unit") +
+  labs(x="Year",
+       y="Retention Rate") +
+  xlim(2006, 2016)
+
+ggplot(new_data_clean, aes(x=retention_rate)) +
+  geom_histogram(binwidth = 50) +
+  #theme_classic() +
+  facet_wrap(~ functional_unit) + # round(retention_rate), round(termination_rate)) +
+  ggtitle("Trends by Functional Unit") +
+  labs(x="Retention Rate",
+       y="Count") 
+
+ggplot(new_data_clean, aes(x=termination_rate)) +
+  geom_histogram(binwidth = 50) +
+  #theme_classic() +
+  facet_wrap(~ functional_unit) +
+  ggtitle("Trends by Functional Unit") +
+  labs(x="Termination Rate",
+       y="Count") 
+
+ggplot(new_data_clean, aes(x=log(termination_rate))) +
+  geom_density()+
+  facet_wrap(~ functional_unit) +
+  ggtitle("Trends by Functional Unit") +
+  labs(x="Termination Rate",
+       y="Density") 
+
+```
+
+#### Visualizing Trends by Department
+```{r group_dept, echo=FALSE}
+
+
+new_data_dept <- employee_data %>%
+ group_by(STATUS_YEAR, STATUS, department_name, mean_age, mean_length_of_service) %>%
+ summarize(TotalEmployees = n(), .groups = "drop") %>%
+ spread(STATUS, TotalEmployees, fill = 0) %>%
+ group_by(department_name) %>%
+ mutate(previous_active = lag(ACTIVE, 1L, default = 0), # shift down by one row within each department
+      termination_rate = 100 * TERMINATED / previous_active,
+      retention_rate = 100 * ACTIVE / previous_active) %>%
+  filter(STATUS_YEAR != 2006, retention_rate < 100)
+
+# Remove Inf and NaN values caused by the lag() function
+new_data_dept_clean <- new_data_dept[complete.cases(new_data_dept), ]
+new_data_dept_clean
+
+ggplot(new_data_dept_clean, aes(x=retention_rate)) +
+  geom_histogram(binwidth = 50) +
+  #theme_classic() +
+  facet_wrap(~ department_name) +
+  ggtitle("Trends by Department") +
+  labs(x="Retention Rate",
+       y="Count") 
+
+
+```
+
+
+#### Summary of Findings:
+
+-   Operations Functional Unit has a stable retention rate over the years, while the Finance department's retention rate is gradually dropping.
+-   Produce, Meats, and Dairy Departments have the highest retention rates.
+-   Termination Rates: The Operations unit started with a high termination rate, which dropped to zero towards 2015. Management has not lost many employees.
+
+
+# 4. Predictive Analytics
+
+## RQ1: Are We Losing More Employees?
+
+```{r employee_data3, echo=FALSE}
+
+ggplot(employee_data, aes(x = factor(STATUS_YEAR), fill = STATUS)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Trend of Employee Status over the Years", x = "Status Year", y = "Count")+
+  theme_classic() +
+  scale_fill_manual(values = c("ACTIVE" = "blue", "TERMINATED" = "red"))
+
+```
+
+The number of active employees increases gradually with a slight drop in 2013. The company records the highest terminations during this year.
+
+### Forecasting Active employees by 2016
+
+```{r forecast_ts, echo=FALSE}
+
+# Table of Active and Terminated per year
+employee_year_status<- employee_data %>% 
+  group_by(STATUS, STATUS_YEAR) %>%
+  summarise(Count = n()) %>%
+  pivot_wider(names_from = STATUS, values_from = Count, values_fill = 0) %>%
+  mutate(TOTAL = ACTIVE + TERMINATED, AVG_ACTIVE = mean(ACTIVE)) %>%
+  rename(YEAR=STATUS_YEAR)
+
+# Create a time series object
+ts_active <- ts(employee_year_status$ACTIVE, start = min(employee_year_status$YEAR), end = max(employee_year_status$YEAR), frequency = 1)
+
+# Build a time series model (e.g., exponential smoothing)
+model_active <- ets(ts_active)
+
+# Forecast for 2016
+forecast(model_active, h = 1)
+
+
+# Bar plot for STATUS per YEAR
+df_forecast = data.frame(
+  STATUS_YEAR = 2016,
+  STATUS = "ACTIVE FORECAST",
+  count = forecast(model_active, h = 1)$mean[1]
+)
+
+ggplot(employee_data, aes(x = factor(STATUS_YEAR), fill = STATUS)) +
+  geom_bar(position = "dodge") +
+  geom_col(data = df_forecast, aes(x = factor(STATUS_YEAR), y = count, fill = STATUS), position = "dodge", width = 0.5) +
+  labs(title = "Status Forecast for 2016 by Status", x = "Status Year", y = "Count") +
+  scale_fill_manual(values = c("ACTIVE" = "blue", "TERMINATED" = "red", "ACTIVE FORECAST" = "navy"))
+
+```
+
+We created a model to verify what we suspected. In 2016 had about the same number of active employees as before.
+
+## RQ2: Which Departments are Likely to Lose the Most Employees?
+
+### Model Selection for Retention Rate Prediction and Classification
+
+```{r aicc_eval, echo=FALSE}
+# Using AICc to determine best logistic regression model
+# Define list of models
+
+age_model <- lm(retention_rate ~ mean_age, data = new_data_dept_clean)
+age_unit_model <- lm(retention_rate ~ mean_age + mean_length_of_service + department_name, data = new_data_dept_clean)
+
+two_model <- lm(retention_rate ~ mean_age + STATUS_YEAR, data = new_data_dept_clean)
+
+global_model <- lm(retention_rate ~ mean_age + mean_length_of_service + STATUS_YEAR, data = new_data_dept_clean)
+null_model <- lm(retention_rate ~ 1, data = new_data_dept_clean)
+
+models <- list("null" = null_model, "all" = global_model,
+                      "age" = age_model,
+                      
+                      "age + unit" = age_unit_model) #store models in a named list
+
+aics <- aictab(cand.set = models) #calculate AIC of each model
+
+confset(cand.set = models) #Model selection based on AICc
+ 
+```
+
+AICc (Akaike Information Criterion with a correction for small sample sizes) evaluation gives a low AICc for the model with age, length of service and status as predictors of retention rate. Therefore, this is the best model. It has the lowest AICc of 607.57. The model with the functional unit was eliminated.
+
+### Predicting Retention Rate Using Logistic Regression
+
+```{r logistic_regression, echo=FALSE}
+#Using the model to predict the retention rate
+
+#Defining the predictors 
+X_scaled <- cbind(new_data_dept_clean$STATUS_YEAR, new_data_dept_clean$mean_age, new_data_dept_clean$mean_length_of_service)
+
+#Defining the train and test data
+split <- sample.split(new_data_dept_clean$retention_rate, SplitRatio = 0.80)
+train2 <- subset(new_data_dept_clean, split == TRUE)
+test2 <- subset(new_data_dept_clean, split == FALSE)
+xtrain2 <- X_scaled[split, ]
+xtest2 <- X_scaled[-split, ]
+ytrain2 <- new_data_dept_clean$retention_rate[split ]
+ytest2 <- new_data_dept_clean$retention_rate[-split ]
+
+
+global_model <- lm(retention_rate ~ STATUS_YEAR + mean_age + mean_length_of_service, data = train2) #fit the model
+
+predictions_lm <- predict(global_model, newdata = test2, type = "response") #make a prediction on
+
+
+plot_data_lm <- data.frame(
+  STATUS_YEAR = test2$STATUS_YEAR,
+  Predicted_Probability = predictions_lm
+)
+
+# Create a scatter plot with ggplot
+ggplot(plot_data_lm, aes(x = STATUS_YEAR, y = Predicted_Probability)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x)+
+  labs(title = "Predicted Retention Rates over Time",
+       x = "STATUS YEAR",
+       y = "Predicted Retention Rates") +
+  theme_classic()
+```
+
+The Logistic Regression model shows a reduction in the Retention Rates over the 10 year period.
+
+### Predicting the Retention Rate for the Subsequent Years The Logistic Regression model was used along with extrapolation to predict the retention rates for the next year
+
+```{r lr_prediction_2016, echo=FALSE}
+# Creating a new data for prediction
+new_data_2016 <- data.frame(
+  STATUS_YEAR = 2016,
+  mean_age = mean(test2$mean_age), #using the mean_age
+  mean_length_of_service = mean(test2$mean_length_of_service)  # using the mean length of service
+)
+prediction_16_lm <- predict(global_model, newdata = new_data_2016, type = "response")
+#plot(global_model)
+
+# Print the best k value
+cat("Predicted Retention Rate for 2016 - 2018 =", prediction_16_lm, "\n")
+```
+
+The model predicts 49.43 as the retention_rate for the subsequent year 2016 which is really low across the entire company. It must be noted however that the departments with Retention rate of 100% were eliminated from the dataset.
+
+## RQ3: Which Employees are Likely to Leave the Company?
+
+### Model Selection for Classification
+
+```{r knn_model, echo=FALSE}
+# Create training and testing datasets
+#Defining the predictors 
+X_scaled <- cbind(new_data_dept_clean$STATUS_YEAR, new_data_dept_clean$mean_age, new_data_dept_clean$mean_length_of_service)
+
+
+#Considering 2 classes for High Retention Rate and Low Retention Rate
+new_data_dept_clean$Rate <- factor(ifelse(new_data_dept_clean$retention_rate > 65, "High", "Low"))
+
+class(new_data_dept_clean$Rate) #ensure Rate is a factor
+#Defining the train and test data
+split <- sample.split(new_data_dept_clean$Rate, SplitRatio = 0.80)
+train <- subset(new_data_dept_clean, split == TRUE)
+test <- subset(new_data_dept_clean, split == FALSE)
+
+larger_data <- train[rep(1:nrow(train), each = 100), ]
+index <- createDataPartition(larger_data$Rate, p = 0.7, list = FALSE)
+xtrain <- larger_data[index, c("mean_age", "mean_length_of_service")]
+ytrain <- factor(larger_data$Rate[index])
+xtest <- larger_data[-index, c("mean_age", "mean_length_of_service")]
+ytest <- factor(larger_data$Rate[-index])
+
+#adding noise to the data to remove ties 
+xtrain <- xtrain + rnorm(nrow(xtrain), mean = 0, sd = 0.01)
+xtest <- xtest + rnorm(nrow(xtest), mean = 0, sd = 0.01)
+
+
+K3 <- knn(train = xtrain, test = xtest, cl = ytrain, k=3)
+K5 <- knn(train = xtrain, test = xtest, cl = ytrain, k=5)
+K10 <- knn(train = xtrain, test = xtest, cl = ytrain, k=10)
+K30 <- knn(train = xtrain, test = xtest, cl = ytrain, k=30)
+K50 <- knn(train = xtrain, test = xtest, cl = ytrain, k=50)
+
+res <- data.frame(ytest, K3, K5, K10, K30, K50)
+#res[]
+
+#Finding the accuracy
+apply(res[,-1], 2, function(c) mean(c==res[,1]))
+
+```
+
+This shows that all K50 has the highest accuracy of 80.6%. We use cross validation to explore more options and select the best k-value.
+
+### Using Cross Validation to Select the Best K-value
+
+```{r knn_cv, echo=FALSE}
+set.seed(20)
+# Setting the number of folds for cross-validation
+num_folds <- 5
+
+#Ensuring ytrain is a factor
+ytrain <- factor(ytrain)
+
+# Perform k-fold cross-validation for different values of k
+k_values <- c(3, 5, 10, 20, 30, 40, 50, 70, 80)
+
+# Create data frames to store the results
+res <- (factor(ytrain))
+results <- data.frame(k = integer(), accuracy = numeric())
+
+for (k in k_values) {
+  set.seed(123)  # For reproducibility
+  
+  # Define the control parameters for cross-validation
+  ctrl <- trainControl(method = "cv", number = num_folds)
+  
+  # Train the k-NN model using cross-validation
+  model <- train(
+   x = xtrain, 
+   y = ytrain, 
+   method = "knn", 
+   trControl = ctrl, 
+   tuneGrid = data.frame(k = k),
+   preProcess = c("center", "scale"),
+   tuneLength = 1
+  )
+
+  # Make predictions on the test set
+  predictions <- predict(model, newdata = xtest, use.all = FALSE)
+  
+  # Store the predictions in the results data frame
+  col_name <- paste("K", k, sep = "")
+  #res[, col_name] <- predictions
+  # Store the predictions in the results data frame
+  assign(col_name, predictions, envir = .GlobalEnv)
+  
+  # Store the performance metrics for each fold
+  fold_results <- data.frame(k = k, accuracy = model$resample$Accuracy)
+  results <- rbind(results, fold_results)
+
+}
+
+# Print the results data frame
+summary(res)
+
+# Find the best k value based on mean accuracy
+best_k <- results %>%
+  group_by(k) %>%
+  summarize(mean_accuracy = mean(accuracy, na.rm = TRUE)) %>%
+  top_n(1, mean_accuracy) %>%
+  pull(k)
+
+# Print the best k value
+cat("Best k value =", best_k, "\n")
+
+```
+
+The model predicts both classes accurately with an accuracy of 100%.
+
+The best k-value is selected as 80 based on the cross validation. Therefore, we use this k-value to classify the employees into groups with the highest and lowest retention rates
+
+### Applying K-NN to classify Retention Rate Classes
+
+```{r knn2, echo=FALSE}
+set.seed(30
+)
+#run the model using k=30 and get the predictions
+knn_model <- train(
+   x = xtrain, 
+   y = ytrain, 
+   method = "knn", 
+   trControl = ctrl, 
+   tuneGrid = data.frame(k = best_k),
+   preProcess = c("center", "scale"),
+   tuneLength = 1
+  )
+ 
+# Make predictions on the test set
+predictions_knn <- predict(knn_model, newdata = xtest, type = "prob")
+
+# Extract the positive class probabilities
+positive_class_probs_knn <- predictions_knn[, "High"]
+
+# Combine predictions with actual classes
+prediction_data <- cbind(as.data.frame(predictions_knn), actual_class = ytest)
+# Reshape data for boxplot for predictions
+prediction_data_long <- tidyr::gather(prediction_data, key = "Class", value = "Probability", -actual_class)
+# Plot boxplot
+ggplot(prediction_data_long, aes(x = Class, y = Probability, fill = factor(actual_class))) +
+  geom_boxplot() +
+  labs(title = "KNN Predicted Probabilities",
+       x = "Class",
+       y = "Probability") +
+  scale_fill_discrete(name = "Actual Class") +
+  theme_classic()
+
+ggplot(prediction_data_long, aes(x = Class, y = Probability, fill = factor(Class))) +
+  geom_boxplot() +
+  labs(title = "KNN Predicted Probabilities",
+       x = "Class",
+       y = "Probability") +
+  scale_fill_discrete(name = "Actual Class") +
+  theme_minimal()
+
+```
+
+```{r roc_knn, echo=FALSE}
+# Create a ROC curve object
+roc_curve <- roc(response = ytest, predictor = positive_class_probs_knn)
+
+# Compute the AUC-ROC and Print it
+auc_score <- auc(roc_curve)
+
+cat("The AUC-ROC Area under the curve is", auc_score, "\n")
+
+# Plot the ROC curve
+plot(roc_curve, main = "ROC Curve", col = "blue", lwd = 2)
+```
+
+AUC_ROC Area under the curve is 0.88 which is close to 1 therefore indicating the KNN model's ability to correctly distinguish betweeen and predict both classes. Therefore,we can conclude that the predictions, very high accuracies and sensitivity is not a random behavior of the models.
+
+```{r knn2016, echo=FALSE}
+
+# Generate 3 random ages between the minimum age and maximum age
+random_ages <- sample(min(train$mean_age):max(train$mean_age), 3, replace = TRUE)
+random_length_of_service <- sample(min(train$mean_length_of_service):max(train$mean_length_of_service), 3, replace = TRUE)
+
+#prediction of the classes for 2016
+new_knn_data_2016 <- data.frame(
+  STATUS_YEAR = c(2016,2017,2018),
+  mean_age = random_ages, #using the mean_age
+  mean_length_of_service = random_length_of_service  # using the mean length of service
+)
+knn_prediction_2016 <- predict(knn_model, newdata = new_knn_data_2016, type = "prob")
+
+# Extract positive class probabilities
+positive_class_probs_2016 <- knn_prediction_2016[, "High"]
+
+#Visualize the predicted classes
+# Combine predictions with actual classes
+prediction_data_2016 <- cbind(as.data.frame(knn_prediction_2016), actual_class = ytest)
+
+# Reshape data for boxplot for predictions
+prediction_data_long_2016 <- tidyr::gather(prediction_data_2016, key = "Class", value = "Probability", -actual_class)
+
+# Create a vector of class labels
+class_labels <- names(prediction_data_long_2016)
+
+#Plot boxplot for 2016
+ggplot(prediction_data_long_2016, aes(x = Class, y = Probability, fill = factor(Class))) +
+   geom_boxplot() +
+   labs(title = "KNN Predicted Probabilities for 2016, 2017, 2018",
+        x = "Class",
+        y = "Probability") +
+   scale_fill_discrete(name = "Actual Class") +
+   theme_classic()
+
+```
+
+The model accurately classifies the employees with highest and lowest retention rates classes for the subsequent years. The prediction shows that all departments across the company will have a high retention rate. However, without test data, it is hard to verify these results.
+
+
+## RQ4: What factors are influencing the most for Retention Rates?
+
+```{r employee_data2, echo=FALSE}
+
+# Convert STATUS to a factor
+employee_data$STATUS <- as.factor(employee_data$STATUS)
+
+# Splitting the data into training and testing sets
+set.seed(123) # For reproducibility
+trainIndex <- createDataPartition(employee_data$STATUS, p = .7, list = FALSE)
+trainData <- employee_data[trainIndex, ]
+testData <- employee_data[-trainIndex, ]
+
+
+# Building a random forest classifier
+model <- randomForest(STATUS ~ city_name + age + length_of_service + gender_short + department_name, 
+                      data = trainData, classwt = c("ACTIVE" = 1, "TERMINATED" = 1))
+
+# Print and plot the variable importance
+#print(varImp(model, scale = FALSE))
+varImpPlot(model)
+
+# Making predictions
+predictions <- predict(model, newdata = testData%>% select(-STATUS))
+
+# Evaluating the predictions for 2015
+confusionMatrix(predictions, testData$STATUS)
+
+# Horizontal bar plot for Age
+ggplot(employee_data %>% filter(STATUS != "ACTIVE"), aes(x = age, fill = termreason_desc)) +
+  geom_bar() +
+  labs(title = "Distribution of Age by Termination", x = "Age", y = "Count",fill = "Termination Reason") +
+  scale_fill_manual(values = c(Retirement = "green", Layoff="red", Resignaton="blue"))
+
+```
+
+The main factor is age, by far. Analyzing we realize that it is because most people retire at 65, if they didn't retire earlier, usually when they were 60 years old.
+
+To further analyze and predict we analyzed employees younger than 60 years old.
+
+```{r employee_data_u60, echo=FALSE}
+
+# Exclude employees 60 years or older
+employee_data_u60 <- employee_data %>% filter(age < 60)
+
+# Splitting the data into training and testing sets
+set.seed(5) # For reproducibility
+trainIndex <- createDataPartition(employee_data_u60$STATUS, p = .8, list = FALSE)
+trainData <- employee_data_u60[trainIndex, ]
+testData <- employee_data_u60[-trainIndex, ]
+
+# Building a random forest classifier
+model2 <- randomForest(STATUS ~ city_name + age + length_of_service + gender_short + department_name, data = trainData, classwt = c("ACTIVE" = 1, "TERMINATED" = 2))
+#model2 <- randomForest(STATUS ~ store_name + age + length_of_service + gender_short + functional_unit, data = trainData, classwt = c("ACTIVE" = 1, "TERMINATED" = 2))
+
+# Plot the variable importance
+varImpPlot(model2)
+
+# Making predictions
+predictions2<- predict(model2, newdata = testData%>% select(-STATUS))
+
+# Evaluating the predictions
+confusionMatrix(predictions2, testData$STATUS)
+
+# Function to calculate metrics
+calculate_metrics <- function(conf_matrix) {
+  TP <- conf_matrix[2, 2]
+  TN <- conf_matrix[1, 1]
+  FP <- conf_matrix[1, 2]
+  FN <- conf_matrix[2, 1]
+
+  accuracy <- (TP + TN) / sum(conf_matrix)
+  precision <- TP / (TP + FP)
+  recall <- TP / (TP + FN)
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+
+  return(c(Accuracy = accuracy, Precision = precision, Recall = recall, F1_Score = f1_score))
+}
+metrics2 <- calculate_metrics(confusionMatrix(predictions2, testData$STATUS)$table)
+
+```
+
+We found that the main factors are City and Age. Age seems to be still an important factor even after removing employees older than 60 years old.
+
+```{r plot_factors, echo=FALSE}
+
+# Filter data for the top 10 cities with the most terminated employees
+top_15_terminated_cities <- employee_data_u60 %>%
+  filter(STATUS == "TERMINATED") %>%
+  group_by(city_name) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count)) %>%
+  head(15) %>%
+  pull(city_name)
+
+# Filter employee_data_u60 for the top 15 cities
+filtered_data <- employee_data_u60 %>%
+  filter(city_name %in% top_15_terminated_cities)
+
+# Horizontal bar plot for city_name
+ggplot(filtered_data, aes(x = fct_infreq(city_name), fill = STATUS)) +
+  geom_bar() +
+  coord_flip() +
+  labs(title = "Distribution of City by Status", x = "City", y = "Count") +
+  scale_fill_manual(values = c("ACTIVE" = "blue", "TERMINATED" = "red"))
+
+# Horizontal bar plot for Age
+ggplot(employee_data_u60, aes(x = age, fill = STATUS)) +
+  geom_bar() +
+  labs(title = "Distribution of Age by Status", x = "Age", y = "Count") +
+  scale_fill_manual(values = c("ACTIVE" = "blue", "TERMINATED" = "red"))
+
+```
+
+```{r forecast_2016, echo=FALSE, results='hide'}
+
+# Get data for next year 2016
+employees_2016 <- employee_data_u60 %>% filter(STATUS == "ACTIVE" & STATUS_YEAR == 2015) %>%
+  mutate(STATUS_YEAR = STATUS_YEAR+1,age=age+1,length_of_service=length_of_service+1)
+
+# Making predictions for the next year
+employees_2016$STATUS <- predict(model2, newdata = employees_2016)
+
+# Calculate prediction probabilites of employees who will be terminated
+employees_2016_probs <- predict(model2, newdata = employees_2016, type="prob")
+employees_2016 <- as.data.frame(cbind(employees_2016, employees_2016_probs))
+
+# View the predictions to show terminated employees
+employees_2016[employees_2016$STATUS == "TERMINATED", ]
+
+# View the percentage 
+employees_2016 %>% filter(TERMINATED >0.4) %>%
+  arrange(desc(TERMINATED))
+
+```
